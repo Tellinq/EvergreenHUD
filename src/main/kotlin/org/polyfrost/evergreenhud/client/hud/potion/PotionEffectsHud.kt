@@ -47,7 +47,6 @@ import org.polyfrost.compose.layout.PolyAlign
 import org.polyfrost.compose.mc.McFontQueue.measureWidth
 import org.polyfrost.compose.render.ImageLoader
 import org.polyfrost.compose.render.PolyColor
-import org.polyfrost.evergreenhud.client.utils.applyCase
 import org.polyfrost.evergreenhud.client.hooks.VanillaHudCompat
 import org.polyfrost.oneconfig.api.config.v1.Node
 import org.polyfrost.oneconfig.api.config.v1.Property
@@ -427,7 +426,9 @@ class PotionEffectsHud : Hud(
         listProp.addCallback(OwnedCallback(this) { next ->
             val target = settings()
             val current = (next as? Array<*>)?.filterIsInstance<String>().orEmpty().toSet()
-            for (field in current - previous) target.copyField(field, categoryScopes.global)
+            val added = current - previous
+            for (field in added) target.copyField(field, categoryScopes.global)
+            if (EffectComponentSettings::caseType.name in added) target.caseType = caseType
             for (field in previous - current) target.copyField(field, EffectComponentSettings.DEFAULTS)
             previous = current
             for (prop in fieldProps) prop.revaluateDisplay()
@@ -682,7 +683,7 @@ class PotionEffectsHud : Hud(
             values.nameEnabled -> name
             amplifierText != null -> amplifierText
             else -> null
-        }
+        }?.let { withCaseType(it, values.caseType) }
 
         val time = when {
             !values.durationEnabled -> null
@@ -701,6 +702,12 @@ class PotionEffectsHud : Hud(
             durationColor = values.durationColor,
             dimmed = dimmed,
         )
+    }
+
+    private fun withCaseType(text: String, caseType: Int): String = when (caseType) {
+        1 -> text.uppercase()
+        2 -> text.lowercase()
+        else -> text
     }
 
     private fun isBlinking(ticks: Int, infinite: Boolean, blinkThreshold: Float): Boolean =
@@ -939,8 +946,7 @@ class PotionEffectsHud : Hud(
     }
 
     @Composable
-    private fun Line(raw: String, scale: Float, fade: Float, color: PolyColor, modifier: PolyModifier = PolyModifier) {
-        val text = applyCase(raw)
+    private fun Line(text: String, scale: Float, fade: Float, color: PolyColor, modifier: PolyModifier = PolyModifier) {
         if (font == Font.Minecraft) {
             PolyMcText(text, color, shadow = showShadow, scale = scale, modifier = modifier)
         } else {
@@ -985,7 +991,7 @@ class PotionEffectsHud : Hud(
         val ambient = EffectComponentSettings()
 
         val scopeDefs: List<ScopeDef> get() = listOf(
-            ScopeDef("global", "Global", global, strippedFields = setOf(OVERRIDDEN_OPTIONS), isOverride = false),
+            ScopeDef("global", "Global", global, strippedFields = setOf(OVERRIDDEN_OPTIONS, "caseType"), isOverride = false),
             ScopeDef("beneficial", BENEFICIAL_EFFECTS, beneficial, strippedFields = setOf("categoryFilter")),
             ScopeDef("neutral", NEUTRAL_EFFECTS, neutral, strippedFields = setOf("categoryFilter")),
             ScopeDef("harmful", HARMFUL_EFFECTS, harmful, strippedFields = setOf("categoryFilter")),
@@ -1095,7 +1101,8 @@ class PotionEffectsHud : Hud(
                 }
             }
         }
-        return if (layers.isEmpty()) categoryScopes.global else LayeredEffectValues(layers, categoryScopes.global)
+        val global = GlobalEffectValues(categoryScopes.global) { caseType }
+        return if (layers.isEmpty()) global else LayeredEffectValues(layers, global)
     }
 
     private class PerEffectSettings {
