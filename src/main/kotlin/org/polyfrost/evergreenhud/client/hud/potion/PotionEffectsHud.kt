@@ -8,25 +8,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameMillis
 //? if > 1.8.9 {
 import net.minecraft.core.registries.BuiltInRegistries
-//? if < 1.21.11
-//import net.minecraft.resources.ResourceLocation
-//? if >= 1.21.11
-import net.minecraft.resources.Identifier as ResourceLocation
-import net.minecraft.server.packs.resources.ReloadableResourceManager
-import net.minecraft.server.packs.resources.ResourceManagerReloadListener
 import net.minecraft.world.effect.MobEffectCategory
 import net.minecraft.world.effect.MobEffectInstance
-import org.polyfrost.oneconfig.api.event.v1.events.InitializationEvent
 //?} else {
 /*import net.minecraft.client.resource.language.I18n
 import net.minecraft.entity.living.effect.StatusEffect
 import net.minecraft.entity.living.effect.StatusEffectInstance as MobEffectInstance
-import net.ornithemc.osl.core.api.util.NamespacedIdentifiers
-import net.ornithemc.osl.resource.loader.api.client.ClientResourceLoaderEvents
-import net.ornithemc.osl.resource.loader.api.resource.manager.ResourceManager
-import org.jetbrains.skia.Bitmap
-import java.util.function.BiConsumer
-import kotlin.math.roundToInt
 *///?}
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.Paint
@@ -45,7 +32,6 @@ import org.polyfrost.compose.composables.size
 import org.polyfrost.compose.composables.width
 import org.polyfrost.compose.layout.PolyAlign
 import org.polyfrost.compose.mc.McFontQueue.measureWidth
-import org.polyfrost.compose.render.ImageLoader
 import org.polyfrost.compose.render.PolyColor
 import org.polyfrost.evergreenhud.client.hooks.VanillaHudCompat
 import org.polyfrost.oneconfig.api.config.v1.Node
@@ -65,10 +51,9 @@ import org.polyfrost.oneconfig.api.hud.v1.Hud
 import org.polyfrost.oneconfig.api.hud.v1.HudAnchor
 import org.polyfrost.oneconfig.api.hud.v1.HudManager
 import org.polyfrost.oneconfig.api.hud.v1.Section
+import org.polyfrost.oneconfig.internal.ui.components.effect.EffectCatalog as OneConfigEffects
 import org.polyfrost.oneconfig.utils.v1.dsl.mc
 import org.polyfrost.oneconfig.utils.v1.MHUtils.setAccessible
-import org.slf4j.LoggerFactory
-import java.util.function.Predicate
 import java.util.function.Supplier
 import kotlin.math.PI
 import kotlin.math.cos
@@ -113,15 +98,15 @@ private val SECTION_GRID = arrayOf(
 )
 
 private const val PER_OPTION_OVERRIDES = 1
+private const val OVERRIDE_GROUPS = 2
+private const val FILTER_GROUPS = 3
 
 class PotionEffectsHud : Hud(
     id = "potion_effects.json",
     title = "Potion Effects",
     category = Category.PLAYER,
 ) {
-    private companion object {
-        private val LOGGER = LoggerFactory.getLogger("EvergreenHUD/Potion Effects")
-
+    companion object {
         private val ROMAN_VALUES = intArrayOf(1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1)
         private val ROMAN_NUMERALS =
             arrayOf("M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I")
@@ -152,83 +137,9 @@ class PotionEffectsHud : Hud(
 
         private val EFFECT_STRIPPED_FIELDS = setOf("categoryFilter")
 
-        private val PROPERTY_CONDITIONS = Property::class.java.getDeclaredField("conditions").apply { setAccessible() }
-        private val PROPERTY_CALLBACKS = Property::class.java.getDeclaredField("callbacks").apply { setAccessible() }
+        private val HIDDEN = Supplier { Property.Display.HIDDEN }
 
         private val iconPaint = Paint()
-        //~ if = 1.8.9 'ResourceLocation' -> 'Int'
-        private val iconCache = HashMap<ResourceLocation, Image?>()
-
-        init {
-            //? if > 1.8.9 {
-            eventHandler { _: InitializationEvent ->
-                val manager = mc.resourceManager as? ReloadableResourceManager
-                if (manager != null) manager.registerReloadListener(ResourceManagerReloadListener { clearIcons() })
-                else LOGGER.warn("Resource manager is not reloadable, potion effect icons will not follow resource pack changes")
-            }
-            //?} else
-            //ClientResourceLoaderEvents.END_RESOURCE_RELOAD.register(BiConsumer { _, _ -> clearIcons() })
-        }
-
-        private fun clearIcons() {
-            iconCache.clear()
-            //? if = 1.8.9
-            //iconsLoaded = false
-        }
-
-        //? if > 1.8.9 {
-        fun iconFor(id: ResourceLocation): Image? {
-            if (iconCache.containsKey(id)) return iconCache[id]
-            val path = ResourceLocation.fromNamespaceAndPath(id.namespace, "textures/mob_effect/${id.path}.png")
-            val icon = try {
-                mc.resourceManager.getResource(path).orElse(null)
-                    ?.open()?.use { ImageLoader.fromBytes(it.readAllBytes()) }
-            } catch (e: Exception) {
-                LOGGER.warn("Failed to load the icon for effect {}", id, e)
-                null
-            }
-            iconCache[id] = icon
-            return icon
-        }
-        //?} else {
-        /*private var iconsLoaded = false
-
-        private fun loadIcons() {
-            val path = NamespacedIdentifiers.from("minecraft", "textures/gui/container/inventory.png")
-            val atlas = ResourceManager.client().getResource(path).orElse(null)?.open()?.use { ImageLoader.fromBytes(it.readBytes()) }
-            if (atlas == null) {
-                LOGGER.warn("Failed to read the potion effect icon atlas {}", path)
-                return
-            }
-            atlas.use {
-                val scale = atlas.width / 256f
-                val size = (ICON * scale).roundToInt()
-                Bitmap().use { bitmap ->
-                    bitmap.allocN32Pixels(size, size)
-                    for (effect in StatusEffect.BY_ID) {
-                        if (effect == null || !effect.hasIcon()) continue
-                        val x = ((effect.iconIndex % 8 * ICON) * scale).roundToInt()
-                        val y = ((198 + effect.iconIndex / 8 * ICON) * scale).roundToInt()
-                        bitmap.erase(0)
-                        if (atlas.readPixels(bitmap, x, y)) iconCache[effect.id] = Image.makeFromBitmap(bitmap)
-                    }
-                }
-            }
-        }
-
-        fun iconFor(effect: StatusEffect): Image? {
-            if (!iconsLoaded) {
-                iconsLoaded = true
-                try {
-                    loadIcons()
-                } catch (e: Exception) {
-                    LOGGER.warn("Failed to load potion effect icons", e)
-                }
-            }
-            return iconCache[effect.id]
-        }
-        *///?}
-
         fun roman(value: Int): String {
             if (value < 1 || value > 3999) return value.toString()
             val builder = StringBuilder()
@@ -286,13 +197,17 @@ class PotionEffectsHud : Hud(
     )
     var sorting = emptyArray<String>()
 
-    @DraggableList(
-        title = "Overrides",
-        description = "Override one or more effects' appearance.",
-        subcategory = "Overrides",
-        checkable = true
-    )
+    @Include
     var overrides = emptyArray<String>()
+
+    @OverrideGroupsOption(
+        title = "Override Groups",
+        description = "Change how matching effects look.",
+        subcategory = "Effects",
+    )
+    var overrideGroupsData = ""
+
+    private var overrideGroups = OverrideGroupsModel()
 
     @Switch(title = "Reversed", subcategory = "Sorting")
     var reversed = false
@@ -344,6 +259,8 @@ class PotionEffectsHud : Hud(
 
     override fun setup() {
         super.setup()
+        overrideGroups.sync(overrideGroupsData)
+        overrideGroups.persist = { overrideGroupsData = it }
         if (isReal) {
             hideIf("hideVanillaEffects") { !VanillaHudCompat.isPresent }
             tickHandler = eventHandler { _: TickEvent.End ->
@@ -351,30 +268,23 @@ class PotionEffectsHud : Hud(
                 updateAndRecalculate()
             }
 
-            val scopes = buildList {
-                for (scope in categoryScopes.scopeDefs) {
-                    if (!scope.isOverride) continue
-                    val key = scope.key
-                    val category = key.takeIf { scope.title != AMBIENT_EFFECTS }
-                    add(OverrideScope(key, scope.title, scope.strippedFields, category, isEffect = false) { categoryScopes[key] })
-                }
-                for (entry in EffectCatalog.ENTRIES) {
-                    val path = entry.path
-                    add(OverrideScope(path, entry.title, EFFECT_STRIPPED_FIELDS, entry.category, isEffect = true) { effectScopes.byPath.getValue(path) })
-                }
+            if (overrideOptionsVersion < OVERRIDE_GROUPS) {
+                val scopes = legacyScopes()
+                migrateLegacyEffectKeys()
+                if (overrideOptionsVersion < PER_OPTION_OVERRIDES) migrateLegacyOverrides(scopes)
+                migrateToOverrideGroups(scopes)
+                overrideOptionsVersion = OVERRIDE_GROUPS
             }
-
-            migrateLegacyEffectKeys()
-
-            if (overrideOptionsVersion < PER_OPTION_OVERRIDES) {
-                migrateLegacyOverrides(scopes)
-                overrideOptionsVersion = PER_OPTION_OVERRIDES
+            if (overrideOptionsVersion < FILTER_GROUPS) {
+                overrideGroups.replace(FilterMigration.run(overrideGroups.groups, categoryScopes.global, EffectCatalog.ENTRIES))
+                overrideOptionsVersion = FILTER_GROUPS
             }
+            stripLegacyScopes()
 
-            val scoped = scopes.flatMap(::setupOverrideScope)
-
-            val overridesProp = claim(getProperty("overrides"))
-            overridesProp.addCallback(OwnedCallback(this) { for (prop in scoped) prop.revaluateDisplay() })
+            val groupsProp = Property.recast<String>(getProperty("overrideGroupsData"))
+            groupsProp.addMetadata(OVERRIDE_GROUPS_MODEL, overrideGroups)
+            groupsProp.addMetadata(OVERRIDE_GROUPS_GLOBAL, categoryScopes.global)
+            overrideGroups.persist = { groupsProp.set(it) }
         }
     }
 
@@ -386,20 +296,14 @@ class PotionEffectsHud : Hud(
         if (VanillaHudCompat.isPresent) VanillaHudCompat.hideStatusEffects(false)
     }
 
-    private fun claim(prop: Property<*>): Property<Any?> {
-        @Suppress("UNCHECKED_CAST")
-        (PROPERTY_CONDITIONS.get(prop) as MutableList<Any>?)?.removeIf { it is OwnedCondition && it.owner !== this }
-        @Suppress("UNCHECKED_CAST")
-        (PROPERTY_CALLBACKS.get(prop) as MutableList<Any>?)?.removeIf { it is OwnedCallback<*> && it.owner !== this }
-        return Property.recast(prop)
-    }
-
+    /** The fixed override slots used before override groups, kept only to migrate them */
     private class OverrideScope(
         val key: String,
         val title: String,
         val stripped: Set<String>,
         val category: String?,
         val isEffect: Boolean,
+        val effectId: String? = null,
         val settings: () -> EffectComponentSettings,
     ) {
         fun overlaps(other: OverrideScope): Boolean = when {
@@ -407,43 +311,55 @@ class PotionEffectsHud : Hud(
             isEffect && other.isEffect -> false
             else -> category == other.category
         }
-    }
 
-    private fun setupOverrideScope(scope: OverrideScope): List<Property<*>> {
-        val key = scope.key
-        val title = scope.title
-        val settings = scope.settings
-        val listProp = claim(getProperty("$key.$OVERRIDDEN_OPTIONS"))
-        listProp.addDisplayCondition(OwnedCondition(this) { title !in overrides })
-
-        val fieldProps = EffectComponentSettings.LEAF_FIELDS.filter { it !in scope.stripped }.map { field ->
-            claim(getProperty("$key.$field")).also { prop ->
-                prop.addDisplayCondition(OwnedCondition(this) { title !in overrides || field !in settings().overriddenOptions })
-            }
+        fun condition(): OverrideCondition = when {
+            isEffect -> OverrideCondition(OverrideCondition.Type.EFFECT, listOf(effectId ?: key))
+            key == "ambient" -> OverrideCondition(OverrideCondition.Type.AMBIENT, listOf(AMBIENT))
+            else -> OverrideCondition(OverrideCondition.Type.CATEGORY, listOf(key))
         }
-
-        var previous = settings().overriddenOptions.toSet()
-        listProp.addCallback(OwnedCallback(this) { next ->
-            val target = settings()
-            val current = (next as? Array<*>)?.filterIsInstance<String>().orEmpty().toSet()
-            for (field in current - previous) target.copyField(field, categoryScopes.global)
-            for (field in previous - current) target.copyField(field, EffectComponentSettings.DEFAULTS)
-            previous = current
-            for (prop in fieldProps) prop.revaluateDisplay()
-        })
-
-        return fieldProps + listProp
     }
 
-    private class OwnedCondition(val owner: PotionEffectsHud, private val hidden: () -> Boolean) : Supplier<Property.Display> {
-        override fun get(): Property.Display = if (hidden()) Property.Display.HIDDEN else Property.Display.SHOWN
-    }
-
-    private class OwnedCallback<T>(val owner: PotionEffectsHud, private val action: (T) -> Unit) : Predicate<T> {
-        override fun test(t: T): Boolean {
-            action(t)
-            return false
+    private fun legacyScopes(): List<OverrideScope> = buildList {
+        for (scope in categoryScopes.scopeDefs) {
+            if (!scope.isOverride) continue
+            val key = scope.key
+            val category = key.takeIf { scope.title != AMBIENT_EFFECTS }
+            add(OverrideScope(key, scope.title, scope.strippedFields, category, isEffect = false) { categoryScopes[key] })
         }
+        for (entry in EffectCatalog.ENTRIES) {
+            val path = entry.path
+            add(OverrideScope(path, entry.title, EFFECT_STRIPPED_FIELDS, entry.category, isEffect = true, effectId = entry.id) { effectScopes.byPath.getValue(path) })
+        }
+    }
+
+    /**
+     * Turns every enabled legacy override into a group in the same order, then keeps any disabled one that
+     * still holds changes as a disabled group so nothing is lost
+     */
+    private fun migrateToOverrideGroups(scopes: List<OverrideScope>) {
+        val byTitle = scopes.associateBy { it.title }
+        val enabled = overrides.mapNotNull { byTitle[it] }.distinct()
+        val disabled = scopes.filter { it !in enabled && it.settings().overriddenOptions.isNotEmpty() }
+
+        fun group(scope: OverrideScope, on: Boolean) = OverrideGroup(
+            name = scope.title,
+            enabled = on,
+            rules = listOf(OverrideRule(listOf(scope.condition()))),
+            settings = EffectComponentSettings().also { it.copyFrom(scope.settings()) },
+        )
+
+        val migrated = enabled.map { group(it, on = true) } + disabled.map { group(it, on = false) }
+        if (migrated.isNotEmpty()) overrideGroups.replace(overrideGroups.groups + migrated)
+        overrides = emptyArray()
+    }
+
+    /** The legacy slots only exist in the tree so old configs bind to them, and must not be saved or shown */
+    private fun stripLegacyScopes() {
+        val tree = tree ?: return
+        for (scope in categoryScopes.scopeDefs) if (scope.isOverride) stripProperty(tree, scope.key)
+        for (entry in EffectCatalog.ENTRIES) stripProperty(tree, entry.path)
+        for (scope in categoryScopes.scopeDefs) if (scope.isOverride) categoryScopes[scope.key].copyFrom(EffectComponentSettings.DEFAULTS)
+        for (settings in effectScopes.byPath.values) settings.copyFrom(EffectComponentSettings.DEFAULTS)
     }
 
     private fun migrateLegacyEffectKeys() {
@@ -617,28 +533,12 @@ class PotionEffectsHud : Hud(
         val values = valuesFor(effect)
 
         if (!values.showEffects) return false
-        if (!values.ambientFilter[0] && effect.isAmbient) return false
-        if (!values.ambientFilter[1] && !effect.isAmbient) return false
-
-        if (!values.permanentEffects[0] && effect.isInfiniteDuration) return false
-        if (!values.permanentEffects[1] && !effect.isInfiniteDuration) return false
 
         val min = values.durationRange[0]
         val max = values.durationRange[1]
         if (min != 0f || max != 0f) {
             if (!effect.isInfiniteDuration && effect.duration / 20f !in min..max) return false
         }
-
-        //? if > 1.8.9 {
-        val category = effect.effect.value().category
-        if (!values.categoryFilter[0] && category == MobEffectCategory.BENEFICIAL) return false
-        if (!values.categoryFilter[1] && category == MobEffectCategory.NEUTRAL) return false
-        if (!values.categoryFilter[2] && category == MobEffectCategory.HARMFUL) return false
-        //?} else {
-        /*val harmful = StatusEffect.BY_ID[effect.id].isHarmful
-        if (!values.categoryFilter[0] && !harmful) return false
-        if (!values.categoryFilter[2] && harmful) return false
-        *///?}
 
         return true
     }
@@ -647,7 +547,7 @@ class PotionEffectsHud : Hud(
         //? if > 1.8.9 {
         val mobEffect = effect.effect.value()
         return row(
-            BuiltInRegistries.MOB_EFFECT.getKey(mobEffect),
+            BuiltInRegistries.MOB_EFFECT.getKey(mobEffect)?.toString(),
             mobEffect.displayName.string,
             effect.duration,
             effect.amplifier,
@@ -658,7 +558,7 @@ class PotionEffectsHud : Hud(
         //?} else {
         /*val statusEffect = StatusEffect.BY_ID[effect.id]
         return row(
-            statusEffect,
+            EffectCatalog.idOf(effect.id),
             I18n.translate(statusEffect.translationKey),
             effect.duration,
             effect.amplifier,
@@ -669,8 +569,7 @@ class PotionEffectsHud : Hud(
         *///?}
     }
 
-    //~ if = 1.8.9 'ResourceLocation?' -> 'StatusEffect?'
-    private fun row(id: ResourceLocation?, name: String, ticks: Int, amplifier: Int, infinite: Boolean, values: EffectComponentValues, dimmed: Boolean = false): Row {
+    private fun row(id: String?, name: String, ticks: Int, amplifier: Int, infinite: Boolean, values: EffectComponentValues, dimmed: Boolean = false): Row {
         val level = amplifier + 1
         val amplifierText = if (values.showAmplifier && level > 1) {
             if (values.amplifierStyle == ROMAN) roman(level) else level.toString()
@@ -689,7 +588,7 @@ class PotionEffectsHud : Hud(
             else -> formatDuration(ticks)
         }
         return Row(
-            icon = if (values.iconEnabled && id != null) iconFor(id) else null,
+            icon = if (values.iconEnabled && id != null) OneConfigEffects.icon(id) else null,
             name = title,
             duration = time,
             blinking = isBlinking(ticks, infinite, values.blinkThreshold),
@@ -964,6 +863,7 @@ class PotionEffectsHud : Hud(
     override fun clone(): Hud = (super.clone() as PotionEffectsHud).also {
         it.sorting = sorting.copyOf()
         it.overrides = overrides.copyOf()
+        it.overrideGroups = overrideGroups.deepCopy()
         it.layoutState = mutableStateOf(layoutState.value)
         it.blinkFade = mutableFloatStateOf(1f)
         it.tickHandler = null
@@ -1030,7 +930,7 @@ class PotionEffectsHud : Hud(
             ))
             collector.handle(t, scope.settings, 0)
             for (field in scope.strippedFields) stripProperty(t, field)
-            if (scope.isOverride) describeOverrideOptions(t, scope.strippedFields)
+            for (field in EffectComponentSettings.RETIRED_FIELDS) t.getProp(field)?.addDisplayCondition(HIDDEN)
             tree.put(t)
         }
 
@@ -1045,54 +945,27 @@ class PotionEffectsHud : Hud(
             ))
             collector.handle(t, settings, 0)
             for (field in EFFECT_STRIPPED_FIELDS) stripProperty(t, field)
-            describeOverrideOptions(t, EFFECT_STRIPPED_FIELDS)
             tree.put(t)
         }
-
-        val liveOptions = buildList {
-            addAll(categoryScopes.scopeDefs.filter { it.isOverride }.map { it.title })
-            addAll(EffectCatalog.ENTRIES.map { it.title })
-        }.toTypedArray()
-
-        val prop = tree.getProp("overrides") ?: throw IllegalStateException("overrides property not found on tree")
-        prop.addMetadata("options", liveOptions)
     }
 
     private fun valuesFor(effect: MobEffectInstance): EffectComponentValues {
         //? if > 1.8.9 {
         val mobEffect = effect.effect.value()
-        val id = BuiltInRegistries.MOB_EFFECT.getKey(mobEffect)
-        val categoryScope = when (mobEffect.category) {
-            MobEffectCategory.BENEFICIAL -> categoryScopes.beneficial
-            MobEffectCategory.NEUTRAL -> categoryScopes.neutral
-            MobEffectCategory.HARMFUL -> categoryScopes.harmful
+        val id = BuiltInRegistries.MOB_EFFECT.getKey(mobEffect)?.toString()
+        val category = when (mobEffect.category) {
+            MobEffectCategory.BENEFICIAL -> CATEGORY_BENEFICIAL
+            MobEffectCategory.NEUTRAL -> CATEGORY_NEUTRAL
+            MobEffectCategory.HARMFUL -> CATEGORY_HARMFUL
         }
         //?} else {
-        /*val statusEffect = StatusEffect.BY_ID[effect.id]
-        val harmful = statusEffect.isHarmful
-        val id = EffectCatalog.pathOf(effect.id)
-        val categoryScope = if (harmful) categoryScopes.harmful else categoryScopes.beneficial
+        /*val id = EffectCatalog.idOf(effect.id)
+        val category = if (StatusEffect.BY_ID[effect.id].isHarmful) CATEGORY_HARMFUL else CATEGORY_BENEFICIAL
         *///?}
 
-        val layers = overrides.mapNotNull { entry ->
-            when (entry) {
-                //? if > 1.8.9 {
-                BENEFICIAL_EFFECTS -> categoryScope.takeIf { mobEffect.category == MobEffectCategory.BENEFICIAL }
-                NEUTRAL_EFFECTS -> categoryScope.takeIf { mobEffect.category == MobEffectCategory.NEUTRAL }
-                HARMFUL_EFFECTS -> categoryScope.takeIf { mobEffect.category == MobEffectCategory.HARMFUL }
-                //?} else {
-                //BENEFICIAL_EFFECTS -> categoryScope.takeIf { !harmful }
-                //NEUTRAL_EFFECTS -> null
-                //HARMFUL_EFFECTS -> categoryScope.takeIf { harmful }
-                //?}
-                AMBIENT_EFFECTS -> categoryScopes.ambient.takeIf { effect.isAmbient }
-                else -> {
-                    val path = EffectCatalog.titleToPath[entry]
-                    //~ if = 1.8.9 'id != null && id.path == path' -> 'id == path'
-                    if (path == null) null else effectScopes.byPath[path]?.takeIf { id != null && id.path == path }
-                }
-            }
-        }
+        overrideGroups.sync(overrideGroupsData)
+        val facts = EffectFacts(id, category, effect.isAmbient, effect.isInfiniteDuration)
+        val layers = overrideGroups.groups.mapNotNull { group -> group.settings.takeIf { group.matches(facts) } }
         return if (layers.isEmpty()) categoryScopes.global else LayeredEffectValues(layers, categoryScopes.global)
     }
 
@@ -1105,13 +978,6 @@ class PotionEffectsHud : Hud(
                 copy.byPath[path]?.copyFrom(settings)
             }
         }
-    }
-
-    private fun describeOverrideOptions(t: Tree, stripped: Set<String>) {
-        val fields = EffectComponentSettings.LEAF_FIELDS.filter { it !in stripped }
-        val prop = t.getProp(OVERRIDDEN_OPTIONS) ?: throw IllegalStateException("$OVERRIDDEN_OPTIONS property not found on ${t.id}")
-        prop.addMetadata("options", fields.toTypedArray())
-        prop.addMetadata("labels", fields.associateWith { t.getProp(it)?.title ?: it })
     }
 
     @Suppress("UNCHECKED_CAST")
