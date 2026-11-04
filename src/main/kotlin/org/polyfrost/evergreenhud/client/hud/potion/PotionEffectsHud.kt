@@ -8,7 +8,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameMillis
 //? if > 1.8.9 {
+import net.minecraft.core.Holder
 import net.minecraft.core.registries.BuiltInRegistries
+import net.minecraft.world.effect.MobEffect
 import net.minecraft.world.effect.MobEffectCategory
 import net.minecraft.world.effect.MobEffectInstance
 //?} else {
@@ -39,12 +41,15 @@ import org.polyfrost.compose.render.PolyFont
 import org.polyfrost.compose.render.FilterQuality
 import org.polyfrost.compose.render.PolyBitmap
 import org.polyfrost.compose.render.PolyColor
+import org.polyfrost.compose.runtime.PolyComposeClock
+import org.polyfrost.compose.runtime.PolyComposeRuntime
 import org.polyfrost.evergreenhud.client.hooks.VanillaHudCompat
 import org.polyfrost.evergreenhud.client.hud.item.potionIdOf
 import org.polyfrost.evergreenhud.client.utils.applyCase
 import org.polyfrost.oneconfig.api.config.v1.Node
 import org.polyfrost.oneconfig.api.config.v1.Property
 import org.polyfrost.oneconfig.api.config.v1.Tree
+import org.polyfrost.oneconfig.api.config.v1.annotations.Dropdown
 import org.polyfrost.oneconfig.api.config.v1.annotations.Include
 import org.polyfrost.oneconfig.api.config.v1.annotations.Slider
 import org.polyfrost.oneconfig.api.config.v1.annotations.Switch
@@ -91,10 +96,19 @@ private const val MC_ITALIC_SHEAR = 0.25f
 
 private val COLOR_CODE = Regex("§[0-9a-fA-FrR]")
 
+private const val NO_APPLICABLE_EFFECTS = "No applicable effects"
+private const val FALLBACK_TICKS = 600
+
 private const val BLINK_PERIOD = 1000L
 private const val BLINK_MIN_FADE = 0.25f
 
 private const val EDITOR_DIM_ALPHA = 0.5f
+
+private const val FILTERED_NEVER = 0
+private const val FILTERED_WHEN_NOT_OVERFLOWING = 1
+private const val FILTERED_ALWAYS = 2
+
+private const val MEASURE_BOUNDS = 100_000f
 
 private const val MODE_AUTO = 0
 private const val MODE_FULL = 1
@@ -161,6 +175,8 @@ class PotionEffectsHud : Hud(
 
         private val PROPERTY_CONDITIONS = Property::class.java.getDeclaredField("conditions").apply { setAccessible() }
         private val PROPERTY_CALLBACKS = Property::class.java.getDeclaredField("callbacks").apply { setAccessible() }
+
+        private val measureClock = PolyComposeClock()
 
         fun roman(value: Int): String {
             if (value < 1 || value > 3999) return value.toString()
@@ -268,6 +284,15 @@ class PotionEffectsHud : Hud(
     )
     var hideVanillaEffects = false
 
+    @Dropdown(
+        title = "Show Filtered Effects in HUD Editor",
+        description = "Show effects hidden by filters, dimmed, in the HUD editor.",
+        options = ["Never", "When Not Overflowing", "Always"],
+        category = "HUD Editor",
+        subcategory = "Filtered Effects",
+    )
+    var showFilteredEffects = FILTERED_WHEN_NOT_OVERFLOWING
+
     @Include
     var overrideOptionsVersion = 0
 
@@ -275,6 +300,9 @@ class PotionEffectsHud : Hud(
     var formattingInitialized = false
 
     private var rows = mutableStateOf<List<Row>>(emptyList())
+
+    private var measureRows = mutableStateOf<List<Row>>(emptyList())
+    private var measurer: PolyComposeRuntime? = null
 
     private data class Layout(val spacing: Float, val horizontal: Boolean, val mode: Int, val align: PolyAlign)
 
@@ -358,6 +386,8 @@ class PotionEffectsHud : Hud(
     override fun remove() {
         tickHandler?.unregister()
         tickHandler = null
+        measurer?.dispose()
+        measurer = null
         if (VanillaHudCompat.isPresent) VanillaHudCompat.hideStatusEffects(false)
     }
 
@@ -622,14 +652,104 @@ class PotionEffectsHud : Hud(
         val active = if (!isReal) emptyList() else mc.player?.activeEffects?.toList().orEmpty()
         //?} else
         //val active = if (!isReal) emptyList() else mc.player?.activeEffects?.filter { StatusEffect.BY_ID.getOrNull(it.id)?.hasIcon() == true }.orEmpty()
-        val effects = active.ifEmpty { if (editing) EXAMPLE_EFFECTS else return emptyList() }
+        if (editing) return editorRows(active)
 
-        val visible = if (editing) effects else effects.filter(::shouldDisplayEffect)
-        if (visible.isEmpty()) return emptyList()
+        return sortedRows(active.filter(::shouldDisplayEffect))
+    }
 
+    private fun editorRows(active: List<MobEffectInstance>): List<Row> {
+        val sources = if (active.isEmpty()) listOf(EXAMPLE_EFFECTS) else listOf(active, EXAMPLE_EFFECTS)
+        for (effects in sources) {
+            if (showFilteredEffects != FILTERED_NEVER) {
+                val all = sortedRows(effects, dimFiltered = true)
+                if (showFilteredEffects == FILTERED_ALWAYS || !overflowsScreen(all)) return all
+            }
+            val visible = sortedRows(effects.filter(::shouldDisplayEffect))
+            if (visible.any(::hasContent)) return visible
+        }
+        val fallback = sortedRows(fallbackExamples()).filter(::hasContent)
+        if (fallback.isNotEmpty()) return fallback
+        return listOf(placeholderRow())
+    }
+
+    private fun hasContent(row: Row): Boolean = row.icon != null || row.name != null || row.duration != null
+
+    /** If all example effects can't show up, go through every registered effect for variants that could get past the filters */
+    private fun fallbackExamples(): List<MobEffectInstance> {
+        val found = mutableListOf<MobEffectInstance>()
+        //? if > 1.8.9 {
+        val effects = BuiltInRegistries.MOB_EFFECT.map { BuiltInRegistries.MOB_EFFECT.wrapAsHolder(it) }
+        //?} else
+        //val effects = StatusEffect.BY_ID.filterNotNull().filter { it.hasIcon() }
+        for (effect in effects) {
+            variants@ for (ambient in booleanArrayOf(false, true)) {
+                val range = valuesFor(example(effect, FALLBACK_TICKS, 0, ambient, infinite = false)).durationRange
+                val ticks = if (range.size >= 2) ((range[0] + range[1]) / 2f * 20f).toInt().coerceAtLeast(1) else FALLBACK_TICKS
+                for (infinite in booleanArrayOf(false, true)) {
+                    for (amplifier in 0..1) {
+                        val candidate = example(effect, ticks, amplifier, ambient, infinite)
+                        if (!shouldDisplayEffect(candidate) || !hasContent(row(candidate))) continue
+                        found += candidate
+                        if (found.size >= EXAMPLES.size) return found
+                        break@variants
+                    }
+                }
+            }
+        }
+        return found
+    }
+
+    //? if > 1.8.9 {
+    private fun example(effect: Holder<MobEffect>, ticks: Int, amplifier: Int, ambient: Boolean, infinite: Boolean): MobEffectInstance =
+        MobEffectInstance(effect, if (infinite) MobEffectInstance.INFINITE_DURATION else ticks, amplifier, ambient, true)
+    //?} else {
+    /*private fun example(effect: StatusEffect, ticks: Int, amplifier: Int, ambient: Boolean, infinite: Boolean): MobEffectInstance =
+        MobEffectInstance(effect.id, ticks, amplifier, ambient, true).also { it.setPermanent(infinite) }
+    *///?}
+
+    /** Shown in the editor when no effect at all can get past the filters, so it is never subject to them */
+    private fun placeholderRow(): Row {
+        return Row(
+            icon = null,
+            iconGap = 0f,
+            name = NO_APPLICABLE_EFFECTS,
+            duration = null,
+            blinking = false,
+            iconBlink = false,
+            nameBlink = false,
+            nameColor = PolyColor.WHITE,
+            nameStyle = 0,
+            durationBlink = false,
+            durationColor = PolyColor.WHITE,
+            durationStyle = 0,
+            dimmed = true,
+        )
+    }
+
+    private fun sortedRows(effects: List<MobEffectInstance>, dimFiltered: Boolean = false): List<Row> {
         sortRules.sync(sortRulesData)
-        val ordered = sortRules.sort(visible, ::sortSubject)
-        return ordered.map { effect -> row(effect, dimmed = editing && !shouldDisplayEffect(effect)) }
+        return sortRules.sort(effects, ::sortSubject).map { effect -> row(effect, dimmed = dimFiltered && !shouldDisplayEffect(effect)) }
+    }
+
+    private fun overflowsScreen(list: List<Row>): Boolean {
+        if (!isReal || list.isEmpty()) return false
+        val runtime = measurer ?: PolyComposeRuntime(measureClock).also {
+            it.setContent { Effects(measureRows.value) }
+            measurer = it
+        }
+        measureRows.value = list
+        runtime.frame(MEASURE_BOUNDS, MEASURE_BOUNDS)
+        val scale = effectiveScale
+        val width = runtime.root.width * scale
+        val height = runtime.root.height * scale
+
+        val fractionX = pivotFractionX
+        val fractionY = pivotFractionY
+        val boxWidth = if (staticWidth) scaledWidth else width
+        val boxHeight = if (staticWidth) scaledHeight else height
+        val left = x + fractionX * (scaledWidth - boxWidth)
+        val top = y + fractionY * (scaledHeight - boxHeight)
+        return left < 0f || top < 0f || left + width > HudManager.guiScreenWidth || top + height > HudManager.guiScreenHeight
     }
 
     private fun sortSubject(effect: MobEffectInstance): SortSubject {
@@ -839,16 +959,22 @@ class PotionEffectsHud : Hud(
 
     @Composable
     override fun Content() {
-        val layout = layoutState.value
         val list = rows.value
-        if (list.isEmpty()) return
-        val scale = textScale.coerceAtLeast(0.01f)
 
         if (list.any { it.blinking }) {
             LaunchedEffect(Unit) {
                 while (true) withFrameMillis { blinkFade.floatValue = currentBlinkFade() }
             }
         }
+
+        Effects(list)
+    }
+
+    @Composable
+    private fun Effects(list: List<Row>) {
+        val layout = layoutState.value
+        if (list.isEmpty()) return
+        val scale = textScale.coerceAtLeast(0.01f)
 
         val fonts = fontRevision.intValue
         val maxRowWidth = remember(list, scale, font, textWeight, layout.mode, fonts) {
@@ -1179,6 +1305,8 @@ class PotionEffectsHud : Hud(
         it.effectScopes = effectScopes.deepCopy()
 
         it.rows = mutableStateOf(emptyList())
+        it.measureRows = mutableStateOf(emptyList())
+        it.measurer = null
         it.layoutSection = mutableStateOf(null)
     }
 
