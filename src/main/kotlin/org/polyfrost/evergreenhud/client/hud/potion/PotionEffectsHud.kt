@@ -69,7 +69,6 @@ import kotlin.math.PI
 import kotlin.math.cos
 
 private const val ICON = 18f
-private const val ICON_GAP = 3f
 private const val LINE_GAP = 1f
 private const val FONT_SIZE = 8f
 
@@ -188,6 +187,7 @@ class PotionEffectsHud : Hud(
 
     private data class Row(
         val icon: PolyBitmap?,
+        val iconGap: Float,
         val name: String?,
         val duration: String?,
         val blinking: Boolean,
@@ -714,6 +714,7 @@ class PotionEffectsHud : Hud(
         }
         return Row(
             icon = if (values.iconEnabled && id != null) OneConfigEffects.icon(id) else null,
+            iconGap = values.iconSpacing,
             name = title,
             duration = time,
             blinking = isBlinking(ticks, infinite, values.blinkThreshold),
@@ -852,19 +853,20 @@ class PotionEffectsHud : Hud(
             val mode = layout.mode
             val hasAnyIcon = list.any { it.icon != null }
             val iconWidth = ICON * scale
-            val iconGap = ICON_GAP * scale
 
             list.maxOf { row ->
                 val nameWidth = row.name?.let { textWidth(it, row.nameStyle, scale) } ?: 0f
                 val durationWidth = row.duration?.let { textWidth(it, row.durationStyle, scale) } ?: 0f
+                val hasText = row.name != null || row.duration != null
+                val iconGap = if (row.icon != null && hasText) row.iconGap * scale else 0f
                 when (mode) {
                     MODE_STACKED -> maxOf(if (row.icon != null) iconWidth else 0f, nameWidth, durationWidth)
                     MODE_SINGLE_LINE -> {
                         val gapWidth = if (row.name != null && row.duration != null) charWidth(scale) else 0f
                         val textWidth = nameWidth + gapWidth + durationWidth
-                        (if (hasAnyIcon) iconWidth + iconGap else 0f) + textWidth
+                        (if (hasAnyIcon) iconWidth else 0f) + iconGap + textWidth
                     }
-                    else -> (if (hasAnyIcon) iconWidth + iconGap else 0f) + maxOf(nameWidth, durationWidth)
+                    else -> (if (hasAnyIcon) iconWidth else 0f) + iconGap + maxOf(nameWidth, durationWidth)
                 }
             }
         }
@@ -889,7 +891,7 @@ class PotionEffectsHud : Hud(
     private fun Effect(row: Row, scale: Float, maxRowWidth: Float, layout: Layout) {
         val mode = layout.mode
         if (mode == MODE_STACKED) {
-            StackedEffect(row, scale, maxRowWidth)
+            StackedEffect(row, scale, maxRowWidth, layout.horizontal)
             return
         }
 
@@ -901,7 +903,7 @@ class PotionEffectsHud : Hud(
         }
 
         PolyBox(modifier = PolyModifier.width(maxRowWidth)) {
-            PolyRow(gap = ICON_GAP * scale, modifier = PolyModifier.align(align)) {
+            PolyRow(gap = row.iconGap * scale, modifier = PolyModifier.align(align)) {
                 if (align != PolyAlign.Right) iconBlock()
 
                 if (row.name != null || row.duration != null) {
@@ -936,7 +938,7 @@ class PotionEffectsHud : Hud(
     }
 
     @Composable
-    private fun StackedEffect(row: Row, scale: Float, maxWidth: Float) {
+    private fun StackedEffect(row: Row, scale: Float, maxWidth: Float, horizontal: Boolean) {
         val style = styleFor(row)
         val reversed = isBottomAligned()
 
@@ -950,12 +952,29 @@ class PotionEffectsHud : Hud(
             if (row.duration != null) Line(row.duration, scale, style.durationFade, style.durationColor, row.durationStyle, modifier = PolyModifier.align(PolyAlign.Center))
         }
 
-        PolyBox(modifier = PolyModifier.width(maxWidth)) {
+        val textBlock: @Composable () -> Unit = {
             PolyColumn(gap = LINE_GAP * scale, modifier = PolyModifier.align(PolyAlign.Center)) {
                 if (reversed) {
-                    durationBlock(); nameBlock(); iconBlock()
+                    durationBlock(); nameBlock()
                 } else {
-                    iconBlock(); nameBlock(); durationBlock()
+                    nameBlock(); durationBlock()
+                }
+            }
+        }
+        val hasText = row.name != null || row.duration != null
+
+        val boxModifier = PolyModifier.width(maxWidth).let {
+            if (reversed && horizontal) it.align(PolyAlign.Bottom) else it
+        }
+
+        PolyBox(modifier = boxModifier) {
+            PolyColumn(gap = row.iconGap * scale, modifier = PolyModifier.align(PolyAlign.Center)) {
+                if (reversed) {
+                    if (hasText) textBlock()
+                    iconBlock()
+                } else {
+                    iconBlock()
+                    if (hasText) textBlock()
                 }
             }
         }
